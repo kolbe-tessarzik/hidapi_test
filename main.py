@@ -116,9 +116,7 @@ class HIDControllerManager:
         activated = []
         for i, controller in enumerate(self.inactive_controllers):
             controller.update()
-            print("Checking L/R")
             if (controller.l or controller.zl) and (controller.r or controller.zr):
-                print("L/R")
                 del self.inactive_controllers[i]
                 activated.append(controller)
                 controller.play_rumble_async( switch_connect_wave(), frame_delay=0.005)
