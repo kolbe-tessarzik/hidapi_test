@@ -4,7 +4,7 @@ import sys
 import time
 import threading
 import struct
-from collections import namedtuple
+from collections import namedtuple, deque
 import math
 
 WIDTH, HEIGHT = 900, 900
@@ -74,8 +74,8 @@ def int_3_byte(data, little_endian):
 
 class HIDControllerManager:
     def __init__(self):
-        self.controllers = []
-        self.inactive_controllers = []
+        self.controllers: list[HIDController] = []
+        self.inactive_controllers: list[HIDController] = []
         self.packet_num = 0
 
     def find_nintendo_devices(self):
@@ -109,16 +109,21 @@ class HIDControllerManager:
                     break # continue with `for d in devs` loop
             else:
                 # if no matching controller found
-                cont = HIDController(device=device, info=d)
+                cont = get_generic_controller(device=device, info=d)
+                print("Create new controller instance")
 
                 opened.append(cont)
         activated = []
-        for controller in self.inactive_controllers:
+        for i, controller in enumerate(self.inactive_controllers):
             controller.update()
+            print("Checking L/R")
             if (controller.l or controller.zl) and (controller.r or controller.zr):
-                del self.inactive_controllers[self.inactive_controllers.index(controller)]
+                print("L/R")
+                del self.inactive_controllers[i]
                 activated.append(controller)
                 controller.play_rumble_async( switch_connect_wave(), frame_delay=0.005)
+                print(self.inactive_controllers)
+                break
 
         self.inactive_controllers += opened
         self.controllers += activated
@@ -127,6 +132,12 @@ class HIDControllerManager:
 class HIDController:
     l_stick_cal_addrs = (0x8010, 0x603D)
     r_stick_cal_addrs = (0x803D, 0x8026, 0x6046, 0x8025)
+    stick_cal_for_pid = {
+        0x2009: StickCal(center=(2075, 2050), min=(550, 550),  max=(3600, 3550), dead=10),
+        0x2007: StickCal(center=None,         min=(770, 725),  max=(3400, 2800), dead=10),
+        0x2006: StickCal(center=None,         min=(650, 1200), max=(3130, 3400), dead=10),
+    }
+
 
     def __init__(self, device, info):
         self.device = device
@@ -135,21 +146,24 @@ class HIDController:
         self._recent_data = None
         self.connected = True
         self.serial = self.info.get('serial_number')
+        self.pid    = self.info.get('product_id'   )
+        self.player = 0
 
         self.last_keepalive = time.time()
 
         self.r_stick = (0, 0)
         self.l_stick = (0, 0)
 
-        self._l_stick_cal = StickCal(center=(2075, 2050), min=(550, 550), max=(3600, 3550), dead=10)
-        self._r_stick_cal = StickCal(center=(2075, 2050), min=(550, 550), max=(3600, 3550), dead=10)
+        self._l_stick_cal = HIDController.stick_cal_for_pid[self.pid]
+        self._r_stick_cal = HIDController.stick_cal_for_pid[self.pid]
 
         self.accel_offset = (0, 0, 0)
         self.accel_scale  = (16384, 16384, 16384)
         self.gyro_offset  = (0, 0, 0)
         self.gyro_scale   = (16, 16, 16)
 
-        self._req_frames = []
+        self._rumble_req_frames = deque()
+        self._light_req_frames  = deque()
         self.rumble_frame_rate = 0.04
 
         self.buttonsDict = {
@@ -171,6 +185,10 @@ class HIDController:
             "right": False,
             "l3": False,
             "r3": False,
+            "sl_left": False,
+            "sr_left": False,
+            "sl_right": False,
+            "sr_right": False,
             "ax": False,
             "ay": False,
             "az": False,
@@ -180,34 +198,44 @@ class HIDController:
         }
 
         self.prepare_controller()
-        self.rumble_thread = None
+        print("Starting thread . . .")
+        self.rumble_thread = threading.Thread(target=self._rumble_worker, daemon=True)
+        self.rumble_thread.start()
+        self.set_light_animation([0xFF]*5 + [0x00]*10)
 
     def prepare_controller(self):
         # Switch to full 0x30 input reports
-        self.send_subcommand(0x03, bytes([0x30]))
+        self.send_subcommand(0x03, payload=bytes([0x30]))
         time.sleep(0.1)
         # get stick calibration
         self.read_stick_cals()
         # Enable tilt controls
-        self.send_subcommand(0x40, bytes([0x01]))
+        self.send_subcommand(0x40, payload=bytes([0x01]))
         # enable rumble
-        self.send_subcommand(0x48, bytes([0x01]))
+        self.send_subcommand(0x48, payload=bytes([0x01]))
+        # set player lights
+        self.send_subcommand(0x30, payload=bytes([0x03]))
 
     def reconnect(self, device):
         self.device = device
         self.connected = True
 
     def __getattr__(self, name):
-        if name in self.buttonsDict.keys():
-            return self.buttonsDict[name]
-        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+        if name == "l_stick":
+            return self.l_stick
+        elif name == "r_stick":
+            return self.r_stick
+        return self.buttonsDict[name]
 
-    def send_subcommand(self, subcmd, payload=b""):
+    def send_subcommand(self, subcmd, rumble=b"", payload=b""):
         # 49-byte output report (Bluetooth)
         report = bytearray(49)
 
         report[0] = 0x01                     # Output report ID
         report[1] = self.packet_num & 0x0F   # Packet counter (0–15)
+
+        for i, rumble_byte in enumerate(rumble):
+            report[2+i] = rumble_byte
 
         # Bytes 2..9 = rumble data (leave zero)
         report[10] = subcmd
@@ -216,27 +244,74 @@ class HIDController:
         self.packet_num += 1
         try:
             self.device.write(bytes(report))
-        except hid.HIDException:
-            print("WARNING: device was disconnected")
+        except hid.HIDException as e:
+            print(f"WARNING: device was disconnected.")
             self.connected = False
 
     def play_rumble_async(self, frames, frame_delay=0.015):
-        if not self.rumble_thread:
-            print("Starting thread . . .")
-            self.rumble_thread = threading.Thread(target=self._rumble_worker, daemon=True)
-            self.rumble_thread.start()
-        self._req_frames = frames
+        self._rumble_req_frames.extend(frames)
         self.rumble_frame_rate = frame_delay
 
+    def set_light_animation(self, frames):
+        self._light_req_frames.extend(frames)
+
+    def set_player(self, num):
+        if num > 4 or num < 0:
+            raise(ValueError(f"invalid player number {num}"))
+        self.player = num
+
+    def get_player_lights(self, num):
+        match num:
+            case 1:
+                return 0b0001
+            case 2:
+                return 0b0011
+            case 3:
+                return 0b0111
+            case 4:
+                return 0b1111
+            case _:
+                return num
+
     def _rumble_worker(self):
+        next_tick = time.monotonic()
+
         while True:
-            if self._req_frames:
-                self.play_rumble_frame(self._req_frames[0])
-                del self._req_frames[0]
-                time.sleep(self.rumble_frame_rate)
+            did_something = False
+
+            # ---- rumble ----
+            if self._rumble_req_frames:
+                did_something = True
+                rumble = self._rumble_req_frames.popleft()
             else:
-                self.stop_rumble()
-                time.sleep(0.04)
+                rumble = b""
+
+            # ---- lights ----
+            if self._light_req_frames:
+                did_something = True
+                lights = self._light_req_frames.popleft()
+            else:
+                lights = self.get_player_lights(self.player)
+
+            if did_something:
+                self.play_frame(rumble, lights)
+
+            # ---- frame pacing ----
+            next_tick += self.rumble_frame_rate
+            sleep = next_tick - time.monotonic()
+
+            if sleep > 0:
+                time.sleep(sleep)
+            else:
+                next_tick = time.monotonic()
+
+    def play_frame(self, rumble=b"", light=0x00):
+        """
+        Send a combination of rumble data and light data to the controller.
+        Defaults to no rumble, lights off
+        """
+        self.send_subcommand(0x30, rumble=rumble, payload=bytes([light]))
+
 
     def play_rumble_frame(self, frame):
         report = bytearray(49)
@@ -265,7 +340,7 @@ class HIDController:
         self.send_subcommand(0x00)
 
     def read_spi(self, addr, size):
-        self.send_subcommand(0x10, bytes([
+        self.send_subcommand(0x10, payload=bytes([
             addr & 0xFF,
             (addr >> 8) & 0xFF,
             (addr >> 16) & 0xFF,
@@ -336,7 +411,6 @@ class HIDController:
                 print("Read spi response")
                 self.read_spi_response(data[15:])
             case _:
-                print(f"unrecognized cmd: {int(cmd)}")
                 return
 
 
@@ -351,9 +425,12 @@ class HIDController:
         """
         Convert raw 12-bit stick value to -100 .. 100 range
         """
-        center = cal.center[axis]
         min_val = cal.min[axis]
         max_val = cal.max[axis]
+        try:
+            center = cal.center[axis]
+        except TypeError:
+             center = (min_val + max_val) / 2
         # Shift relative to center
         delta = value - center
 
@@ -383,6 +460,8 @@ class HIDController:
 
         x =  self.scale_axis(raw_x, 0, self._l_stick_cal)
         y = -self.scale_axis(raw_y, 1, self._l_stick_cal)
+        # x = raw_x
+        # y = raw_y
 
         return (x, y)
 
@@ -397,6 +476,10 @@ class HIDController:
 
         x =  self.scale_axis(raw_x, 0, self._r_stick_cal)
         y = -self.scale_axis(raw_y, 1, self._r_stick_cal)
+
+        # x = raw_x
+        # y = raw_y
+
 
         return (x, y)
 
@@ -443,7 +526,7 @@ class HIDController:
         if (time.time() - self.last_keepalive) > 1.0:
             # Switch to full 0x30 input reports
             # unecessary, but to keep controller on
-            self.send_subcommand(0x03, bytes([0x30]))
+            self.send_subcommand(0x03, payload=bytes([0x30]))
             self.last_keepalive = time.time()
 
         # 10/11 = r stick X/Y
@@ -451,26 +534,100 @@ class HIDController:
             self.r_stick = self.right_stick(self._recent_data)
             self.l_stick = self.left_stick(self._recent_data)
 
-            self.buttonsDict["zl"]      = self.get_button_state(7)
-            self.buttonsDict["zr"]      = self.get_button_state(23)
-            self.buttonsDict["l"]       = self.get_button_state(6)
-            self.buttonsDict["r"]       = self.get_button_state(22)
-            self.buttonsDict["plus"]    = self.get_button_state(9)
-            self.buttonsDict["minus"]   = self.get_button_state(8)
-            self.buttonsDict["home"]    = self.get_button_state(12)
-            self.buttonsDict["capture"] = self.get_button_state(13)
-            self.buttonsDict["a"]       = self.get_button_state(19)
-            self.buttonsDict["b"]       = self.get_button_state(18)
-            self.buttonsDict["x"]       = self.get_button_state(17)
-            self.buttonsDict["y"]       = self.get_button_state(16)
-            self.buttonsDict["up"]      = self.get_button_state(1)
-            self.buttonsDict["down"]    = self.get_button_state(0)
-            self.buttonsDict["left"]    = self.get_button_state(3)
-            self.buttonsDict["right"]   = self.get_button_state(2)
-            self.buttonsDict["l3"]     = self.get_button_state(11)
-            self.buttonsDict["r3"]     = self.get_button_state(10)
+            self.buttonsDict["zl"]       = self.get_button_state(7 )
+            self.buttonsDict["zr"]       = self.get_button_state(23)
+            self.buttonsDict["l"]        = self.get_button_state(6 )
+            self.buttonsDict["r"]        = self.get_button_state(22)
+            self.buttonsDict["plus"]     = self.get_button_state(9 )
+            self.buttonsDict["minus"]    = self.get_button_state(8 )
+            self.buttonsDict["home"]     = self.get_button_state(12)
+            self.buttonsDict["capture"]  = self.get_button_state(13)
+            self.buttonsDict["a"]        = self.get_button_state(19)
+            self.buttonsDict["b"]        = self.get_button_state(18)
+            self.buttonsDict["x"]        = self.get_button_state(17)
+            self.buttonsDict["y"]        = self.get_button_state(16)
+            self.buttonsDict["up"]       = self.get_button_state(1 )
+            self.buttonsDict["down"]     = self.get_button_state(0 )
+            self.buttonsDict["left"]     = self.get_button_state(3 )
+            self.buttonsDict["right"]    = self.get_button_state(2 )
+            self.buttonsDict["l3"]       = self.get_button_state(11)
+            self.buttonsDict["r3"]       = self.get_button_state(10)
+            self.buttonsDict["sl_left"]  = self.get_button_state(5 )
+            self.buttonsDict["sr_left"]  = self.get_button_state(4 )
+            self.buttonsDict["sl_right"] = self.get_button_state(21)
+            self.buttonsDict["sr_right"] = self.get_button_state(20)
 
             self.unpack_tilt_controls()
+# BC:CE:25:6E:EF:D8
+class GenericHIDController(HIDController):
+    def __init__(self, device, info):
+        # ensure self.button_mapping exists
+        try:
+            self.button_mapping
+        except:
+            self.button_mapping = {}
+        # self.stick = (0, 0)
+        super().__init__(device, info)
+
+    def __getattr__(self, name):
+        if name in self.button_mapping.keys():
+            return super().__getattr__(self.button_mapping[name])
+        else:
+            return super().__getattr__(name)
+
+class GenericHIDProController(GenericHIDController):
+    def __init__(self, device, info):
+        self.button_mapping = {"stick": "l_stick", "click": "l3"} # all other mappings are pass-through
+        super().__init__(device, info)
+
+class GenericHIDLeftJoycon(GenericHIDController):
+    def __init__(self, device, info):
+        self.button_mapping = {
+            "click": "l3",
+            "a": "down",
+            "b": "left",
+            "x": "right",
+            "y": "up",
+            "l": "sl_left",
+            "r": "sr_left",
+            "z": "zl",
+        }
+        super().__init__(device, info)
+
+    def __getattr__(self, name):
+        if name == "stick":
+            return (self.l_stick[1], -self.l_stick[0])
+        return super().__getattr__(name)
+
+class GenericHIDRightJoycon(GenericHIDController):
+    def __init__(self, device, info):
+        self.button_mapping = {
+            "click": "r3",
+            "a": "x",
+            "b": "a",
+            "x": "y",
+            "y": "b",
+            "l": "sl_right",
+            "r": "sr_right",
+            "z": "zr",
+        }
+        super().__init__(device, info)
+
+    def __getattr__(self, name):
+        if name == "stick":
+            return (-self.r_stick[1], self.r_stick[0])
+        return super().__getattr__(name)
+
+def get_generic_controller(device, info) -> GenericHIDController:
+    match info['product_id']:
+        case 0x2009:
+            return GenericHIDProController(device, info)
+        case 0x2006:
+            return GenericHIDLeftJoycon(device, info)
+        case 0x2007:
+            return GenericHIDRightJoycon(device, info)
+        case _:
+            raise(ValueError(f"Unexpected PID: {info['product_id']}"))
 
 def draw_stick(surface, x, y, stick_pos):
     pygame.draw.circle(surface, (0, 0, 255), (x + stick_pos[0], y + stick_pos[1]), 50)
@@ -507,14 +664,15 @@ def main():
             screen.blit(surf, (20, y))
             y += 26
 
+        manager.open_devices()
         if not cont:
-            manager.open_devices()
             if manager.controllers:
                 cont = manager.controllers[0]
                 info = manager.controllers[0].info
-        if cont:
+        if cont and info:
 
             cont.update()
+            cont.set_player(1)
 
             draw("Nintendo Switch Bluetooth HID Demo")
             draw("")
@@ -536,8 +694,6 @@ def main():
             else:
                 hexline = "(no packet)"
             draw(hexline)
-            draw(f"ZL: {cont.zl}")
-            draw(f"ZR: {cont.zr}")
             draw(f"L: {cont.l}")
             draw(f"R: {cont.r}")
             draw(f"PLUS: {cont.plus}")
@@ -548,14 +704,9 @@ def main():
             draw(f"B: {cont.b}")
             draw(f"X: {cont.x}")
             draw(f"Y: {cont.y}")
-            draw(f"UP: {cont.up}")
-            draw(f"DOWN: {cont.down}")
-            draw(f"LEFT: {cont.left}")
-            draw(f"RIGHT: {cont.right}")
-            draw(f"L3: {cont.l3}")
-            draw(f"R3: {cont.r3}")
-            draw(f"R Stick X: {cont.r_stick[0]}")
-            draw(f"R Stick Y: {cont.r_stick[1]}")
+            draw(f"Click: {cont.click}")
+            draw(f"Stick X: {cont.stick[0]}")
+            draw(f"Stick Y: {cont.stick[1]}")
             # draw(f"AX: {cont.ax}")
             # draw(f"AY: {cont.ay}")
             # draw(f"AZ: {cont.az}")
@@ -563,8 +714,9 @@ def main():
             # draw(f"GY: {cont.gy}")
             # draw(f"GZ: {cont.gz}")
 
-            draw_stick(screen, 300, 500, (cont.l_stick[0], cont.l_stick[1]))
-            draw_stick(screen, 600, 700, (cont.r_stick[0], cont.r_stick[1]))
+            draw_stick(screen, 300, 500, (cont.stick[0], cont.stick[1]))
+            # draw_stick(screen, 600, 700, (cont.r_stick[0], cont.r_stick[1]))
+
 
         pygame.display.flip()
         clock.tick(240)
