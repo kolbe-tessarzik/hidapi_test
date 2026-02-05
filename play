@@ -1,0 +1,26 @@
+#!/bin/bash
+target_ver=3.13.7
+dot_python_version=$(cat .python-version)
+
+check_target_ver() {
+    # return 0 and update target_ver with the latest installed version match
+    # return 1 if no installed version match is found; DO NOT modify target_ver
+    pyenv latest $target_ver 1> /dev/null 2> /dev/null && target_ver=$(pyenv latest $target_ver)
+}
+
+check_active_python_version() {
+    python -c "import platform; import sys; sys.exit(0 if platform.python_version() == '${target_ver}' else 1)"
+}
+
+# check if the target_ver is installed, and install it if not found
+check_target_ver || ( echo "target_ver (Python ${target_ver}) not found!"; ( set -x; pyenv install $target_ver ) && check_target_ver )
+
+# check if the active python version (selected by .python-version) matches target_ver;
+#  if not, delete the virtualenv and re-create it from scratch
+check_active_python_version || ( echo "Delete the ${dot_python_version} virtualenv and rebuild it:"; ( set -x; yes | pyenv virtualenv-delete $dot_python_version ) )
+
+set -x
+pyenv virtualenv $target_ver $dot_python_version
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python .
