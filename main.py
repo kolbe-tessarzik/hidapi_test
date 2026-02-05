@@ -4,21 +4,24 @@ import sys
 import time
 import threading
 import struct
+import json
 from collections import namedtuple, deque
 import math
 
 WIDTH, HEIGHT = 900, 900
 
-pygame.init()
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Nintendo Switch Bluetooth HID Demo")
-
-font = pygame.font.SysFont("monospace", 24)
-
 StickCal = namedtuple('StickCal', ['center', 'min', 'max', 'dead'])
+
+def stick_cal_from_dict(d: dict) -> StickCal:
+    return StickCal(center=d["center"], min=d["min"], max=d["max"], dead=10)
 
 NINTENDO_VID = 0x057E
 
+try:
+    with open("cal.json") as f:
+        custom_cal = json.load(f)
+except FileNotFoundError:
+    custom_cal = {}
 
 # right joycon PID: 0x2007
 # left joycon PID: 0x2006
@@ -151,13 +154,19 @@ class HIDController:
         self.pid    = self.info.get('product_id'   )
         self.player = 0
 
+        self.raw = False
+
         self.last_keepalive = time.time()
 
         self.r_stick = (0, 0)
         self.l_stick = (0, 0)
 
-        self._l_stick_cal = HIDController.stick_cal_for_pid[self.pid]
-        self._r_stick_cal = HIDController.stick_cal_for_pid[self.pid]
+        if self.serial in custom_cal.keys():
+            self._l_stick_cal = stick_cal_from_dict(custom_cal[self.serial])
+            self._r_stick_cal = stick_cal_from_dict(custom_cal[self.serial])
+        else:
+            self._l_stick_cal = HIDController.stick_cal_for_pid[self.pid]
+            self._r_stick_cal = HIDController.stick_cal_for_pid[self.pid]
 
         self.accel_offset = (0, 0, 0)
         self.accel_scale  = (16384, 16384, 16384)
@@ -464,8 +473,9 @@ class HIDController:
 
         x =  self.scale_axis(raw_x, 0, self._l_stick_cal)
         y = -self.scale_axis(raw_y, 1, self._l_stick_cal)
-        # x = raw_x
-        # y = raw_y
+        if self.raw:
+            x = raw_x
+            y = raw_y
 
         return (x, y)
 
@@ -481,11 +491,14 @@ class HIDController:
         x =  self.scale_axis(raw_x, 0, self._r_stick_cal)
         y = -self.scale_axis(raw_y, 1, self._r_stick_cal)
 
-        # x = raw_x
-        # y = raw_y
-
+        if self.raw:
+            x = raw_x
+            y = raw_y
 
         return (x, y)
+
+    def set_raw(self, raw: bool):
+        self.raw = raw
 
     def read_data_raw(self):
         # read all available data, return the latest complete packet
@@ -601,7 +614,10 @@ class GenericHIDLeftJoycon(GenericHIDController):
 
     def __getattr__(self, name):
         if name == "stick":
-            return (self.l_stick[1], -self.l_stick[0])
+            if self.raw:
+                return self.l_stick
+            else:
+                return (self.l_stick[1], -self.l_stick[0])
         return super().__getattr__(name)
 
 class GenericHIDRightJoycon(GenericHIDController):
@@ -620,7 +636,10 @@ class GenericHIDRightJoycon(GenericHIDController):
 
     def __getattr__(self, name):
         if name == "stick":
-            return (-self.r_stick[1], self.r_stick[0])
+            if self.raw:
+                return self.r_stick
+            else:
+                return (-self.r_stick[1], self.r_stick[0])
         return super().__getattr__(name)
 
 def get_generic_controller(device, info) -> GenericHIDController:
@@ -638,6 +657,14 @@ def draw_stick(surface, x, y, stick_pos):
     pygame.draw.circle(surface, (0, 0, 255), (x + stick_pos[0], y + stick_pos[1]), 50)
 
 def main():
+    # pygame.init()
+    pygame.display.init()
+    pygame.font.init()
+    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    pygame.display.set_caption("Nintendo Switch Bluetooth HID Demo")
+
+    font = pygame.font.SysFont("monospace", 24)
+
     clock = pygame.time.Clock()
 
     manager = HIDControllerManager()
