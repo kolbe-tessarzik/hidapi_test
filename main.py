@@ -127,6 +127,10 @@ class HIDControllerManager:
         self.controllers += activated
         return activated
 
+    def on_exit(self):
+        for controller in (self.controllers + self.inactive_controllers):
+            controller.play_frame(light=0x01)
+
 class HIDController:
     l_stick_cal_addrs = (0x8010, 0x603D)
     r_stick_cal_addrs = (0x803D, 0x8026, 0x6046, 0x8025)
@@ -225,6 +229,13 @@ class HIDController:
             return self.r_stick
         return self.buttonsDict[name]
 
+    def write_to_device(self, data):
+        try:
+            self.device.write(bytes(data))
+        except hid.HIDException as e:
+            print(f"WARNING: device was disconnected.")
+            self.connected = False
+
     def send_subcommand(self, subcmd, rumble=b"", payload=b""):
         # 49-byte output report (Bluetooth)
         report = bytearray(49)
@@ -240,11 +251,7 @@ class HIDController:
         report[11:11+len(payload)] = payload
 
         self.packet_num += 1
-        try:
-            self.device.write(bytes(report))
-        except hid.HIDException as e:
-            print(f"WARNING: device was disconnected.")
-            self.connected = False
+        self.write_to_device(report)
 
     def play_rumble_async(self, frames, frame_delay=0.015):
         self._rumble_req_frames.extend(frames)
@@ -318,8 +325,7 @@ class HIDController:
         report[2:10] = bytes(frame)
         report[10] = 0x00
         self.packet_num += 1
-        self.device.write(bytes(report))
-
+        self.write_to_device(report)
 
     def play_rumble(self, frames, frame_delay=0.015):
         """
@@ -515,7 +521,8 @@ class HIDController:
         try:
             self._recent_data = self.read_data_raw()
         except hid.HIDException as e:
-            print("Device timed out")
+            # print(e)
+            # print("Device timed out")
             self.connected = False
             return
         # if self._recent_data:
@@ -721,6 +728,7 @@ def main():
 
     if cont and cont.device:
         cont.device.close()
+    manager.on_exit()
     pygame.quit()
     sys.exit()
 
