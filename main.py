@@ -77,7 +77,7 @@ def int_3_byte(data, little_endian):
 
 class HIDControllerManager:
     def __init__(self):
-        self.controllers: list[HIDController] = []
+        self.controllers: list[GenericHIDController] = []
         self.inactive_controllers: list[HIDController] = []
         self.packet_num = 0
 
@@ -593,6 +593,10 @@ class GenericHIDController(HIDController):
         else:
             return super().__getattr__(name)
 
+    @property
+    def stick(self) -> tuple[int, int]:
+        return self.l_stick
+
 class GenericHIDProController(GenericHIDController):
     def __init__(self, device, info):
         self.button_mapping = {"stick": "l_stick", "click": "l3"} # all other mappings are pass-through
@@ -612,13 +616,11 @@ class GenericHIDLeftJoycon(GenericHIDController):
         }
         super().__init__(device, info)
 
-    def __getattr__(self, name):
-        if name == "stick":
-            if self.raw:
-                return self.l_stick
-            else:
-                return (self.l_stick[1], -self.l_stick[0])
-        return super().__getattr__(name)
+    @property
+    def stick(self) -> tuple[int, int]:
+        if self.raw:
+            return self.l_stick
+        return (self.l_stick[1], -self.l_stick[0])
 
 class GenericHIDRightJoycon(GenericHIDController):
     def __init__(self, device, info):
@@ -634,13 +636,11 @@ class GenericHIDRightJoycon(GenericHIDController):
         }
         super().__init__(device, info)
 
-    def __getattr__(self, name):
-        if name == "stick":
-            if self.raw:
-                return self.r_stick
-            else:
-                return (-self.r_stick[1], self.r_stick[0])
-        return super().__getattr__(name)
+    @property
+    def stick(self) -> tuple[int, int]:
+        if self.raw:
+            return self.r_stick
+        return (-self.r_stick[1], self.r_stick[0])
 
 def get_generic_controller(device, info) -> GenericHIDController:
     match info['product_id']:
@@ -670,7 +670,7 @@ def main():
     manager = HIDControllerManager()
     manager.open_devices()
 
-    cont = None
+    cont: GenericHIDController | None = None
     info = None
 
     try:
