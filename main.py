@@ -453,13 +453,18 @@ class HIDController:
         else:
             scaled = delta / (max_val - center) * 100
 
+        # apply dead zone
+        if abs(scaled) < cal.dead:
+            scaled = 0
+
+
+        # scale extra so it's not as hard to get to 100
+        scaled *= 1.02
+
         # Clamp
         if scaled < -100: scaled = -100
         if scaled > 100: scaled = 100
 
-        #apply dead zone
-        if abs(scaled) < cal.dead:
-            scaled = 0
         return int(scaled)
 
     def left_stick(self, report):
