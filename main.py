@@ -116,9 +116,10 @@ class HIDControllerManager:
                 print("Create new controller instance")
 
                 opened.append(cont)
+        for controller in (self.controllers + self.inactive_controllers):
+            controller.update()
         activated = []
         for i, controller in enumerate(self.inactive_controllers):
-            controller.update()
             if (controller.l or controller.zl) and (controller.r or controller.zr):
                 del self.inactive_controllers[i]
                 activated.append(controller)
