@@ -6,7 +6,7 @@ import threading
 import struct
 import json
 from collections import namedtuple, deque
-from typing import TypedDict, NotRequired
+from typing import TypedDict, NotRequired, Protocol, Any
 import math
 
 WIDTH, HEIGHT = 900, 900
@@ -85,7 +85,7 @@ def int_3_byte(data, little_endian):
 class HIDControllerManager:
     def __init__(self):
         self.controllers: list[GenericHIDController] = []
-        self.inactive_controllers: list[HIDController] = []
+        self.inactive_controllers: list[GenericHIDController] = []
         self.packet_num: int = 0
 
     def find_nintendo_devices(self) -> list[DevDict]:
@@ -93,7 +93,7 @@ class HIDControllerManager:
         repeats = []
         for d in devs:
             for controller in (self.controllers + self.inactive_controllers):
-                if controller.connected and controller.serial == d.get('serial_number'):
+                if controller.connected and controller.owns_device(d):
                     # already connected to this device
                     repeats.append(d)
         # delete all repeated devices
@@ -113,9 +113,9 @@ class HIDControllerManager:
                 print(f"WARNING: Failed to open device at path: {d["path"]}")
                 continue
             for controller in (self.controllers + self.inactive_controllers):
-                if not controller.connected and controller.serial == d.get('serial_number'):
+                if not controller.connected and controller.owns_device(d):
                     # same conroller, reconnect
-                    controller.reconnect(device)
+                    controller.reconnect(device, d)
                     break # continue with `for d in devs` loop
             else:
                 # if no matching controller found
@@ -125,6 +125,9 @@ class HIDControllerManager:
                 opened.append(cont)
         for controller in (self.controllers + self.inactive_controllers):
             controller.update()
+        joycon_pressing_l: GenericHIDController | None = None
+        joycon_pressing_r: GenericHIDController | None = None
+
         activated = []
         for i, controller in enumerate(self.inactive_controllers):
             if (controller.l or controller.zl) and (controller.r or controller.zr):
@@ -133,6 +136,22 @@ class HIDControllerManager:
                 controller.play_rumble_async( switch_connect_wave(), frame_delay=0.005)
                 print(self.inactive_controllers)
                 break
+            elif isinstance(controller, GenericHIDLeftJoycon) and (controller.raw_l or controller.raw_zl):
+                joycon_pressing_l = controller
+            elif isinstance(controller, GenericHIDRightJoycon) and (controller.raw_r or controller.raw_zr):
+                joycon_pressing_r = controller
+
+        if joycon_pressing_l and joycon_pressing_r:
+            print("Two joycon press")
+
+            assert(isinstance(joycon_pressing_l, GenericHIDLeftJoycon) and isinstance(joycon_pressing_r, GenericHIDRightJoycon))
+            controller = GenericHIDTwoJoycons(joycon_pressing_l, joycon_pressing_r)
+            activated.append(controller)
+            controller.play_rumble_async( switch_connect_wave(), frame_delay=0.005)
+            del self.inactive_controllers[self.inactive_controllers.index(joycon_pressing_l)]
+            del self.inactive_controllers[self.inactive_controllers.index(joycon_pressing_r)]
+
+
 
         self.inactive_controllers += opened
         self.controllers += activated
@@ -235,15 +254,26 @@ class HIDController:
         # set player lights
         self.send_subcommand(0x30, payload=bytes([0x03]))
 
-    def reconnect(self, device):
+    def reconnect(self, device: hid.Device, info: DevDict):
         self.device = device
+        self.info = info
         self.connected = True
+        # self.serial = self.info.get('serial_number')
+        # self.pid = self.info.get('product_id')
 
-    def __getattr__(self, name):
+    def owns_device(self, info: DevDict) -> bool:
+        path = self.info.get("path")
+        if path is not None and path == info.get("path"):
+            return True
+        return self.serial is not None and self.serial == info.get("serial_number")
+
+    def __getattr__(self, name: str):
         if name == "l_stick":
             return self.l_stick
         elif name == "r_stick":
             return self.r_stick
+        elif name.startswith("raw_"):
+            return self.buttonsDict[name[4:]]
         return self.buttonsDict[name]
 
     def write_to_device(self, data):
@@ -592,8 +622,53 @@ class HIDController:
             self.buttonsDict["sr_right"] = self.get_button_state(20)
 
             self.unpack_tilt_controls()
+
+class GenericHIDController(Protocol):
+    zl: bool
+    zr: bool
+    l:  bool
+    r:  bool
+
+    a: bool
+    b: bool
+    x: bool
+    y: bool
+
+    plus:    bool
+    minus:   bool
+    home:    bool
+    capture: bool
+
+    click: bool
+
+    stick: tuple[int, int]
+
+    _recent_data: bytes
+
+    device: hid.Device
+    info:   DevDict
+
+    connected: bool
+
+    serial: str | None
+    pid: int | None
+
+    def update(self) -> None: ...
+
+    def set_player(self, num: int) -> None: ...
+
+    def reconnect(self, dev: hid.Device, info: DevDict) -> None: ...
+
+    def play_frame(self, rumble=None, light=None) -> None: ...
+
+    def owns_device(self, info: DevDict) -> bool: ...
+
+    # HIDController exposes dynamic names such as raw_* via __getattr__.
+    # Returning Any lets callers use those names without listing them here.
+    def __getattr__(self, name: str) -> Any: ...
+
 # BC:CE:25:6E:EF:D8
-class GenericHIDController(HIDController):
+class GenericHIDControllerImpl(HIDController, GenericHIDController):
     def __init__(self, device, info):
         # ensure self.button_mapping exists
         try:
@@ -613,12 +688,12 @@ class GenericHIDController(HIDController):
     def stick(self) -> tuple[int, int]:
         return self.l_stick
 
-class GenericHIDProController(GenericHIDController):
+class GenericHIDProController(GenericHIDControllerImpl):
     def __init__(self, device, info):
         self.button_mapping = {"stick": "l_stick", "click": "l3"} # all other mappings are pass-through
         super().__init__(device, info)
 
-class GenericHIDLeftJoycon(GenericHIDController):
+class GenericHIDLeftJoycon(GenericHIDControllerImpl):
     def __init__(self, device, info):
         self.button_mapping = {
             "click": "l3",
@@ -638,7 +713,7 @@ class GenericHIDLeftJoycon(GenericHIDController):
             return self.l_stick
         return (self.l_stick[1], -self.l_stick[0])
 
-class GenericHIDRightJoycon(GenericHIDController):
+class GenericHIDRightJoycon(GenericHIDControllerImpl):
     def __init__(self, device, info):
         self.button_mapping = {
             "click": "r3",
@@ -668,6 +743,114 @@ def get_generic_controller(device, info) -> GenericHIDController:
             return GenericHIDRightJoycon(device, info)
         case _:
             raise(ValueError(f"Unexpected PID: {info['product_id']}"))
+
+class GenericHIDTwoJoycons(GenericHIDController):
+    def __init__(self, l_cont: GenericHIDLeftJoycon, r_cont: GenericHIDRightJoycon):
+        self.l_cont = l_cont
+        self.r_cont = r_cont
+        self._recent_data = self.l_cont._recent_data or self.r_cont._recent_data or b""
+        self.info = {
+            'product_id': 0x2008,
+            'path': b'n/a',
+        }
+        serials = [serial for serial in (self.l_cont.serial, self.r_cont.serial) if serial]
+        self.serial = "+".join(serials) if serials else None
+        self.pid = 0x2008
+
+    def __getattr__(self, name):
+        if name == "stick" or name == "l_stick":
+            return self.l_cont.l_stick
+        if name == "r_stick":
+            return self.r_cont.r_stick
+        candidate_names = [name]
+        if not name.startswith("raw_"):
+            candidate_names.insert(0, f"raw_{name}")
+
+        for candidate_name in candidate_names:
+            left_missing = right_missing = False
+            try:
+                left_value = getattr(self.l_cont, candidate_name)
+            except (AttributeError, KeyError):
+                left_missing = True
+                left_value = None
+            try:
+                right_value = getattr(self.r_cont, candidate_name)
+            except (AttributeError, KeyError):
+                right_missing = True
+                right_value = None
+
+            if left_missing and right_missing:
+                continue
+            if left_missing:
+                return right_value
+            if right_missing:
+                return left_value
+            if isinstance(left_value, bool) and isinstance(right_value, bool):
+                return left_value or right_value
+            return left_value
+
+        raise(AttributeError(name))
+
+    def update(self):
+        self.l_cont.update()
+        self.r_cont.update()
+        self._recent_data = self.l_cont._recent_data or self.r_cont._recent_data or b""
+
+    def set_player(self, num):
+        self.l_cont.set_player(num)
+        self.r_cont.set_player(num)
+
+    def reconnect(self, dev: hid.Device, info: DevDict) -> None:
+        if self.l_cont.owns_device(info):
+            self.l_cont.reconnect(dev, info)
+            return
+        if self.r_cont.owns_device(info):
+            self.r_cont.reconnect(dev, info)
+            return
+        raise(ValueError(f"Device does not belong to this Joy-Con pair: {info.get('path')}"))
+
+    def owns_device(self, info: DevDict) -> bool:
+        return self.l_cont.owns_device(info) or self.r_cont.owns_device(info)
+
+    def play_frame(self, rumble=b"", light=0x00) -> None:
+        self.l_cont.play_frame(rumble=rumble, light=light)
+        self.r_cont.play_frame(rumble=rumble, light=light)
+
+    def play_rumble(self, *args, **kwargs):
+        self.l_cont.play_rumble(*args, **kwargs)
+        self.r_cont.play_rumble(*args, **kwargs)
+
+    def play_rumble_async(self, *args, **kwargs):
+        self.l_cont.play_rumble_async(*args, **kwargs)
+        self.r_cont.play_rumble_async(*args, **kwargs)
+
+
+    @property
+    def connected(self):
+        return self.l_cont.connected and self.r_cont.connected
+
+    @property
+    def device(self):
+        return self.l_cont.device
+
+    zl: bool
+    zr: bool
+    l: bool
+    r: bool
+    a: bool
+    b: bool
+    x: bool
+    y: bool
+    plus: bool
+    minus: bool
+    home: bool
+    capture: bool
+    click: bool
+    stick: tuple[int, int]
+    info: DevDict
+    serial: str | None
+    pid: int | None
+
 
 def draw_stick(surface, x, y, stick_pos):
     pygame.draw.circle(surface, (0, 0, 255), (x + stick_pos[0], y + stick_pos[1]), 50)
