@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hid
 import pygame
 import sys
@@ -6,17 +8,21 @@ import threading
 import struct
 import json
 from collections import namedtuple, deque
-from typing import TypedDict, NotRequired, Protocol, Any
+from typing import TypedDict, Protocol, Any
 import math
 from pathlib import Path
 
 WIDTH, HEIGHT = 900, 900
 
-# Define the structure of the dictionary
-class DevDict(TypedDict):
-    serial_number: NotRequired[str]
+# Python 3.9 does not support typing.NotRequired, so model the optional
+# serial_number key via TypedDict inheritance instead.
+class _DevDictRequired(TypedDict):
     product_id: int
     path: bytes
+
+
+class DevDict(_DevDictRequired, total=False):
+    serial_number: str
 
 StickCal = namedtuple('StickCal', ['center', 'min', 'max', 'dead'])
 
@@ -322,17 +328,15 @@ class HIDController:
         self.player = num
 
     def get_player_lights(self, num):
-        match num:
-            case 1:
-                return 0b0001
-            case 2:
-                return 0b0011
-            case 3:
-                return 0b0111
-            case 4:
-                return 0b1111
-            case _:
-                return num
+        if num == 1:
+            return 0b0001
+        if num == 2:
+            return 0b0011
+        if num == 3:
+            return 0b0111
+        if num == 4:
+            return 0b1111
+        return num
 
     def _rumble_worker(self):
         next_tick = time.monotonic()
@@ -408,18 +412,18 @@ class HIDController:
         ]))
 
     def read_stick_cals(self):
-        match self.info['product_id']:
-            case 0x2009: # pro controller
-                # left stick
-                self.read_spi(0x8010, 18)
-                # right stick
-                self.read_spi(0x6046, 18)
-            case 0x2006:
-                # left joycon
-                self.read_spi(0x8010, 18)
-            case 0x2007:
-                # right joycon
-                self.read_spi(0x8026, 18)
+        product_id = self.info['product_id']
+        if product_id == 0x2009: # pro controller
+            # left stick
+            self.read_spi(0x8010, 18)
+            # right stick
+            self.read_spi(0x6046, 18)
+        elif product_id == 0x2006:
+            # left joycon
+            self.read_spi(0x8010, 18)
+        elif product_id == 0x2007:
+            # right joycon
+            self.read_spi(0x8026, 18)
 
     def read_tilt_control_cal(self, data):
         sys_cal = struct.unpack("<12h", data[:24])
@@ -466,12 +470,11 @@ class HIDController:
         #     print(hex(b), end=" ")
         # print("\n")
         cmd = data[14]
-        match int(cmd):
-            case 0x10:
-                print("Read spi response")
-                self.read_spi_response(data[15:])
-            case _:
-                return
+        if int(cmd) == 0x10:
+            print("Read spi response")
+            self.read_spi_response(data[15:])
+        else:
+            return
 
 
     def unpack_tilt_controls(self):
@@ -743,15 +746,14 @@ class GenericHIDRightJoycon(GenericHIDControllerImpl):
         return (-self.r_stick[1], self.r_stick[0])
 
 def get_generic_controller(device, info) -> GenericHIDController:
-    match info['product_id']:
-        case 0x2009:
-            return GenericHIDProController(device, info)
-        case 0x2006:
-            return GenericHIDLeftJoycon(device, info)
-        case 0x2007:
-            return GenericHIDRightJoycon(device, info)
-        case _:
-            raise(ValueError(f"Unexpected PID: {info['product_id']}"))
+    product_id = info['product_id']
+    if product_id == 0x2009:
+        return GenericHIDProController(device, info)
+    if product_id == 0x2006:
+        return GenericHIDLeftJoycon(device, info)
+    if product_id == 0x2007:
+        return GenericHIDRightJoycon(device, info)
+    raise(ValueError(f"Unexpected PID: {info['product_id']}"))
 
 class GenericHIDTwoJoycons(GenericHIDController):
     def __init__(self, l_cont: GenericHIDLeftJoycon, r_cont: GenericHIDRightJoycon):
