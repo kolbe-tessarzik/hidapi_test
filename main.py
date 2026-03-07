@@ -110,7 +110,7 @@ class HIDControllerManager:
             try:
                 device = hid.Device( path=d["path"] )
             except hid.HIDException:
-                print(f"WARNING: Failed to open device at path: {d["path"]}")
+                print(f"WARNING: Failed to open device at path: {d['path']}")
                 continue
             for controller in (self.controllers + self.inactive_controllers):
                 if not controller.connected and controller.owns_device(d):
