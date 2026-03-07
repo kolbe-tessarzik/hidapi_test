@@ -8,6 +8,7 @@ import json
 from collections import namedtuple, deque
 from typing import TypedDict, NotRequired, Protocol, Any
 import math
+from pathlib import Path
 
 WIDTH, HEIGHT = 900, 900
 
@@ -25,7 +26,7 @@ def stick_cal_from_dict(d: dict) -> StickCal:
 NINTENDO_VID = 0x057E
 
 try:
-    with open("cal.json") as f:
+    with open(Path(__file__).with_name("cal.json")) as f:
         custom_cal = json.load(f)
 except FileNotFoundError:
     custom_cal = {}
@@ -123,15 +124,20 @@ class HIDControllerManager:
                 print("Create new controller instance")
 
                 opened.append(cont)
-        for controller in (self.controllers + self.inactive_controllers):
+        pairing_candidates = self.inactive_controllers + opened
+
+        for controller in (self.controllers + pairing_candidates):
             controller.update()
         joycon_pressing_l: GenericHIDController | None = None
         joycon_pressing_r: GenericHIDController | None = None
 
         activated = []
-        for i, controller in enumerate(self.inactive_controllers):
+        for i, controller in enumerate(pairing_candidates):
             if (controller.l or controller.zl) and (controller.r or controller.zr):
-                del self.inactive_controllers[i]
+                if controller in self.inactive_controllers:
+                    del self.inactive_controllers[self.inactive_controllers.index(controller)]
+                if controller in opened:
+                    del opened[opened.index(controller)]
                 activated.append(controller)
                 controller.play_rumble_async( switch_connect_wave(), frame_delay=0.005)
                 print(self.inactive_controllers)
@@ -148,8 +154,11 @@ class HIDControllerManager:
             controller = GenericHIDTwoJoycons(joycon_pressing_l, joycon_pressing_r)
             activated.append(controller)
             controller.play_rumble_async( switch_connect_wave(), frame_delay=0.005)
-            del self.inactive_controllers[self.inactive_controllers.index(joycon_pressing_l)]
-            del self.inactive_controllers[self.inactive_controllers.index(joycon_pressing_r)]
+            for joycon in (joycon_pressing_l, joycon_pressing_r):
+                if joycon in self.inactive_controllers:
+                    del self.inactive_controllers[self.inactive_controllers.index(joycon)]
+                if joycon in opened:
+                    del opened[opened.index(joycon)]
 
 
 
