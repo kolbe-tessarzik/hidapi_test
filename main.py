@@ -6,9 +6,16 @@ import threading
 import struct
 import json
 from collections import namedtuple, deque
+from typing import TypedDict, NotRequired
 import math
 
 WIDTH, HEIGHT = 900, 900
+
+# Define the structure of the dictionary
+class DevDict(TypedDict):
+    serial_number: NotRequired[str]
+    product_id: int
+    path: bytes
 
 StickCal = namedtuple('StickCal', ['center', 'min', 'max', 'dead'])
 
@@ -79,9 +86,9 @@ class HIDControllerManager:
     def __init__(self):
         self.controllers: list[GenericHIDController] = []
         self.inactive_controllers: list[HIDController] = []
-        self.packet_num = 0
+        self.packet_num: int = 0
 
-    def find_nintendo_devices(self):
+    def find_nintendo_devices(self) -> list[DevDict]:
         devs = [d for d in hid.enumerate() if d["vendor_id"] == NINTENDO_VID]
         repeats = []
         for d in devs:
@@ -145,22 +152,22 @@ class HIDController:
     }
 
 
-    def __init__(self, device, info):
-        self.device = device
+    def __init__(self, device: hid.Device, info: DevDict):
+        self.device: hid.Device = device
         self.info = info
-        self.packet_num = 0
-        self._recent_data = None
+        self.packet_num: int = 0
+        self._recent_data: bytes | None = None
         self.connected = True
-        self.serial = self.info.get('serial_number')
-        self.pid    = self.info.get('product_id'   )
-        self.player = 0
+        self.serial: str | None = self.info.get('serial_number')
+        self.pid:    int | None = self.info.get('product_id'   )
+        self.player: int = 0
 
-        self.raw = False
+        self.raw: bool = False
 
-        self.last_keepalive = time.time()
+        self.last_keepalive: float = time.time()
 
-        self.r_stick = (0, 0)
-        self.l_stick = (0, 0)
+        self.r_stick: tuple[int, int] = (0, 0)
+        self.l_stick: tuple[int, int] = (0, 0)
 
         if self.serial in custom_cal.keys():
             self._l_stick_cal = stick_cal_from_dict(custom_cal[self.serial])
@@ -174,8 +181,8 @@ class HIDController:
         self.gyro_offset  = (0, 0, 0)
         self.gyro_scale   = (16, 16, 16)
 
-        self._rumble_req_frames = deque()
-        self._light_req_frames  = deque()
+        self._rumble_req_frames: deque[bytes] = deque()
+        self._light_req_frames: deque[int]  = deque()
         self.rumble_frame_rate = 0.04
 
         self.buttonsDict = {
@@ -267,10 +274,10 @@ class HIDController:
         self._rumble_req_frames.extend(frames)
         self.rumble_frame_rate = frame_delay
 
-    def set_light_animation(self, frames):
+    def set_light_animation(self, frames: list[int]):
         self._light_req_frames.extend(frames)
 
-    def set_player(self, num):
+    def set_player(self, num: int):
         if num > 4 or num < 0:
             raise(ValueError(f"invalid player number {num}"))
         self.player = num
@@ -435,7 +442,7 @@ class HIDController:
 
         self.ax, self.ay, self.az, self.gx, self.gy, self.gz = struct.unpack_from("<hhhhhh", self._recent_data, base)
 
-    def scale_axis(self, value, axis, cal):
+    def scale_axis(self, value: int, axis: int, cal: StickCal) -> int:
         """
         Convert raw 12-bit stick value to -100 .. 100 range
         """
@@ -444,6 +451,7 @@ class HIDController:
         try:
             center = cal.center[axis]
         except TypeError:
+             # if center is not given, calculate it
              center = (min_val + max_val) / 2
         # Shift relative to center
         delta = value - center
@@ -530,6 +538,8 @@ class HIDController:
         # ignore 0x21 sucommand replies
         if latest and  latest[0] == 0x30:
             return latest
+        else:
+            return self._recent_data
 
     def get_button_state(self, bit_index):
         assert(self._recent_data is not None)
