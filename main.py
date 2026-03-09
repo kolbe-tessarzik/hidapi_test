@@ -139,7 +139,7 @@ class HIDControllerManager:
 
         activated = []
         for i, controller in enumerate(pairing_candidates):
-            if (controller.l or controller.zl) and (controller.r or controller.zr):
+            if controller.l and controller.r:
                 if controller in self.inactive_controllers:
                     del self.inactive_controllers[self.inactive_controllers.index(controller)]
                 if controller in opened:
@@ -148,9 +148,9 @@ class HIDControllerManager:
                 controller.play_rumble_async( switch_connect_wave(), frame_delay=0.005)
                 print(self.inactive_controllers)
                 break
-            elif isinstance(controller, GenericHIDLeftJoycon) and (controller.raw_l or controller.raw_zl):
+            elif isinstance(controller, GenericHIDLeftJoycon) and controller.raw_l:
                 joycon_pressing_l = controller
-            elif isinstance(controller, GenericHIDRightJoycon) and (controller.raw_r or controller.raw_zr):
+            elif isinstance(controller, GenericHIDRightJoycon) and controller.raw_r:
                 joycon_pressing_r = controller
 
         if joycon_pressing_l and joycon_pressing_r:
