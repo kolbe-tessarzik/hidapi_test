@@ -199,6 +199,7 @@ class HIDController:
         self.raw: bool = False
 
         self.last_keepalive: float = time.time()
+        self.last_packet_time: float = time.time()
 
         self.r_stick: tuple[int, int] = (0, 0)
         self.l_stick: tuple[int, int] = (0, 0)
@@ -218,6 +219,7 @@ class HIDController:
         self._rumble_req_frames: deque[bytes] = deque()
         self._light_req_frames: deque[int]  = deque()
         self.rumble_frame_rate = 0.04
+        self._rumble_queue_max = 255  # cap to avoid starving input reads
 
         self.buttonsDict = {
             "zl": False,
@@ -316,7 +318,12 @@ class HIDController:
         self.write_to_device(report)
 
     def play_rumble_async(self, frames, frame_delay=0.015):
-        self._rumble_req_frames.extend(frames)
+        if frames:
+            # Append to existing queue (do not replace), capped at 255 frames.
+            for frame in frames:
+                if len(self._rumble_req_frames) >= self._rumble_queue_max:
+                    break
+                self._rumble_req_frames.append(frame)
         self.rumble_frame_rate = frame_delay
 
     def set_light_animation(self, frames: list[int]):
@@ -560,6 +567,7 @@ class HIDController:
         # read all available data, return the latest complete packet
         # this avoids lag from buffered packets
         latest = None
+        got_new = False
 
         while True:
             try:
@@ -576,12 +584,13 @@ class HIDController:
                 self.unpack_command_response(d)
 
             latest = d
+            got_new = True
 
         # ignore 0x21 sucommand replies
         if latest and  latest[0] == 0x30:
-            return latest
+            return latest, got_new
         else:
-            return self._recent_data
+            return self._recent_data, False
 
     def get_button_state(self, bit_index):
         assert(self._recent_data is not None)
@@ -590,7 +599,7 @@ class HIDController:
 
     def update(self):
         try:
-            self._recent_data = self.read_data_raw()
+            self._recent_data, got_new = self.read_data_raw()
         except hid.HIDException as e:
             # print(e)
             # print("Device timed out")
@@ -607,6 +616,8 @@ class HIDController:
 
         # 10/11 = r stick X/Y
         if self._recent_data:
+            if got_new:
+                self.last_packet_time = time.time()
             self.r_stick = self.right_stick(self._recent_data)
             self.l_stick = self.left_stick(self._recent_data)
 
@@ -634,6 +645,19 @@ class HIDController:
             self.buttonsDict["sr_right"] = self.get_button_state(20)
 
             self.unpack_tilt_controls()
+        else:
+            # If no packets arrive for a while, clear state to avoid "stuck" inputs.
+            if (time.time() - self.last_packet_time) > 0.25:
+                self.r_stick = (0, 0)
+                self.l_stick = (0, 0)
+                for k in self.buttonsDict.keys():
+                    self.buttonsDict[k] = False
+        if (not got_new) and (time.time() - self.last_packet_time) > 0.25:
+            # No fresh packets for a while; clear state even if we still have stale data.
+            self.r_stick = (0, 0)
+            self.l_stick = (0, 0)
+            for k in self.buttonsDict.keys():
+                self.buttonsDict[k] = False
 
 class GenericHIDController(Protocol):
     zl: bool
