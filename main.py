@@ -13,6 +13,7 @@ import math
 from pathlib import Path
 
 WIDTH, HEIGHT = 900, 900
+RUMBLE_FRAME_DELAY = 0.021
 
 # Python 3.9 does not support typing.NotRequired, so model the optional
 # serial_number key via TypedDict inheritance instead.
@@ -45,21 +46,20 @@ def switch_connect_wave():
     frames = []
 
     # fast attack
-    for a in (0x30, 0x50):
+    for a in (0x50, 0x80):
         frames.append([
             0xC0,0x10,a,0x30,
             0xC0,0x10,a,0x30
         ])
 
-    # short sustain
-    for _ in range(3):
-        frames.append([
-            0xC0,0x20,0x4F,0x30,
-            0xC0,0x20,0x4F,0x30
-        ])
+    # brief sustain
+    frames.append([
+        0xC0,0x20,0x5A,0x30,
+        0xC0,0x20,0x5A,0x30
+    ])
 
-    # decay
-    for a in (0x40, 0x30, 0x00):
+    # quick decay
+    for a in (0x30, 0x10):
         frames.append([
             0x80,0x40,a,0x30,
             0x80,0x40,a,0x30
@@ -72,10 +72,10 @@ def switch_connect_wave():
 
 
     frames.append(brake)  # brief brake
-    frames.append(brake)  # brief brake
 
 
     return frames
+
 
 def normalize(pkt):
     # If first byte is not valid report id, prepend dummy
@@ -145,7 +145,7 @@ class HIDControllerManager:
                 if controller in opened:
                     del opened[opened.index(controller)]
                 activated.append(controller)
-                controller.play_rumble_async( switch_connect_wave(), frame_delay=0.005)
+                controller.play_rumble_async(switch_connect_wave())
                 print(self.inactive_controllers)
                 break
             elif isinstance(controller, GenericHIDLeftJoycon) and controller.raw_l:
@@ -159,7 +159,7 @@ class HIDControllerManager:
             assert(isinstance(joycon_pressing_l, GenericHIDLeftJoycon) and isinstance(joycon_pressing_r, GenericHIDRightJoycon))
             controller = GenericHIDTwoJoycons(joycon_pressing_l, joycon_pressing_r)
             activated.append(controller)
-            controller.play_rumble_async( switch_connect_wave(), frame_delay=0.005)
+            controller.play_rumble_async(switch_connect_wave())
             for joycon in (joycon_pressing_l, joycon_pressing_r):
                 if joycon in self.inactive_controllers:
                     del self.inactive_controllers[self.inactive_controllers.index(joycon)]
@@ -317,14 +317,16 @@ class HIDController:
         self.packet_num += 1
         self.write_to_device(report)
 
-    def play_rumble_async(self, frames, frame_delay=0.015):
+    def play_rumble_async(self, frames, replace=False):
+        if replace:
+            self._rumble_req_frames.clear()
         if frames:
             # Append to existing queue (do not replace), capped at 255 frames.
             for frame in frames:
                 if len(self._rumble_req_frames) >= self._rumble_queue_max:
                     break
                 self._rumble_req_frames.append(frame)
-        self.rumble_frame_rate = frame_delay
+        self.rumble_frame_rate = RUMBLE_FRAME_DELAY
 
     def set_light_animation(self, frames: list[int]):
         self._light_req_frames.extend(frames)
@@ -375,6 +377,8 @@ class HIDController:
             if sleep > 0:
                 time.sleep(sleep)
             else:
+                # If we're behind, yield a tiny slice to avoid starving reads.
+                time.sleep(0.001)
                 next_tick = time.monotonic()
 
     def play_frame(self, rumble=b"", light=0x00):
@@ -394,15 +398,14 @@ class HIDController:
         self.packet_num += 1
         self.write_to_device(report)
 
-    def play_rumble(self, frames, frame_delay=0.015):
+    def play_rumble(self, frames):
         """
         frames: list of 8-byte lists
-        frame_delay: seconds per frame (~60Hz)
         """
 
         for frame in frames:
             self.play_rumble_frame(frame)
-            time.sleep(frame_delay)
+            time.sleep(RUMBLE_FRAME_DELAY)
 
         # stop vibration
         self.send_subcommand(0x00)
@@ -581,6 +584,8 @@ class HIDController:
                 break
 
             if len(d) >= 13 and d[0] == 0x21:
+                # 0x21 = subcommand reply; log so we can see if they stop too.
+                print(f"HID 0x21 reply packet received. Timestamp: {time.time()}")
                 self.unpack_command_response(d)
 
             latest = d
@@ -604,7 +609,7 @@ class HIDController:
             # print(e)
             # print("Device timed out")
             self.connected = False
-            return
+            return False
         # if self._recent_data:
         #     print(f"Report ID: 0x{self._recent_data[0]:02x}")
 
@@ -658,6 +663,7 @@ class HIDController:
             self.l_stick = (0, 0)
             for k in self.buttonsDict.keys():
                 self.buttonsDict[k] = False
+        return got_new
 
 class GenericHIDController(Protocol):
     zl: bool
