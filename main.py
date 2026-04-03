@@ -585,7 +585,7 @@ class HIDController:
 
             if len(d) >= 13 and d[0] == 0x21:
                 # 0x21 = subcommand reply; log so we can see if they stop too.
-                print(f"HID 0x21 reply packet received. Timestamp: {time.time()}")
+                # print(f"HID 0x21 reply packet received. Timestamp: {time.time()}")
                 self.unpack_command_response(d)
 
             latest = d
